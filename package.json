@@ -9,6 +9,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
+    "@ai-sdk/google": "^1.1.10",
     "@ai-sdk/openai": "^1.1.9",
     "@types/node": "^22.13.1",
     "ai": "^4.1.24",

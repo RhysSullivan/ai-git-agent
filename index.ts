@@ -1,5 +1,5 @@
 import { generateObject, generateText, tool } from 'ai';
-import { openai } from '@ai-sdk/openai';
+import { google } from '@ai-sdk/google';
 import { z } from 'zod';
 import simpleGit from 'simple-git';
 import path from 'path';
@@ -10,9 +10,10 @@ import chalk from 'chalk';
 if (import.meta.main) {
   const filePath = Bun.argv[2];
   const searchDescription = Bun.argv[3];
+  const debug = Bun.argv.includes('--debug');
 
   if (!filePath || !searchDescription) {
-    console.error('Usage: bun run index.ts <file_path> <search_description>');
+    console.error('Usage: bun run index.ts <file_path> <search_description> [--debug]');
     process.exit(1);
   }
 
@@ -31,16 +32,72 @@ if (import.meta.main) {
     const git = simpleGit({ baseDir: fileDir });
 
     console.clear();
-    console.log(`Starting analysis for ${filePath} with description: ${chalk.yellow.bold(searchDescription)}`);
+    if (debug) {
+      console.log(`Starting analysis for ${filePath} with description: ${chalk.yellow.bold(searchDescription)}`);
+    }
     
     // Use --follow to track file history through renames
     const commits = await git.log(['--follow', absolutePath]);
-    console.log(`Found ${commits.all.length} commits on ${filePath} (including renames)`);
+    
+    if (debug) {
+      console.log(`Found ${commits.all.length} commits on ${filePath} (including renames)`);
+    }
+
+    const relevantResults: Array<{
+      commitHash: string;
+      diffUrl: string;
+      description: string;
+      diff: string;
+    }> = [];
+    
+    // Helper function to render the current status
+    const renderStatus = (commit: any, currentIndex: number, total: number, matchCount: number) => {
+      // Save cursor position
+      process.stdout.write('\u001B[s');
+      // Move to top of screen
+      process.stdout.write('\u001B[0;0H');
+      // Clear status area (5 lines)
+      process.stdout.write('\u001B[K\u001B[K\u001B[K\u001B[K\u001B[K');
+      
+      console.log(chalk.blue(`Progress: checking commit ${currentIndex + 1}/${total}`));
+      console.log(chalk.dim(`Current commit: ${commit.hash}`));
+      console.log(chalk.yellow(`Query: ${searchDescription}`));
+      console.log(chalk.green(`Matches found: ${matchCount}`));
+      console.log(chalk.dim('─'.repeat(process.stdout.columns)));
+      
+      // Restore cursor position
+      process.stdout.write('\u001B[u');
+    };
+
+    // Helper function to render results
+    const renderResults = (results: typeof relevantResults, currentIndex: number = 0) => {
+      if (results.length === 0) return;
+      
+      console.clear();
+      console.log(chalk.bold(`\n🔍 Found ${results.length} relevant changes:`));
+      console.log(chalk.dim(`(Use ← → arrow keys to navigate, press 'q' to quit)\n`));
+      
+      const result = results[currentIndex];
+      console.log(chalk.bold(`Result ${currentIndex + 1}/${results.length}:`));
+      console.log(chalk.dim(`Commit: ${result.commitHash}`));
+      console.log(chalk.dim(`URL: ${result.diffUrl}`));
+      console.log(chalk.dim(`Description: ${result.description}`));
+      console.log('\n' + chalk.dim('Changes:'));
+      console.log(result.diff);
+      console.log('\n' + chalk.dim('─'.repeat(80)) + '\n');
+    };
+
+    // Clear screen once at the start
+    console.clear();
+    // Add initial padding for status area
+    console.log('\n'.repeat(5));
     
     for (const commit of commits.all) {
+      renderStatus(commit, commits.all.indexOf(commit), commits.all.length, relevantResults.length);
+
       // Skip first commit as it has no parent to diff against
       if (commit.hash === commits.all[commits.all.length - 1].hash) {
-        console.log('Skipping first commit (no parent to diff against)');
+        debug && console.log('Skipping first commit (no parent to diff against)');
         continue;
       }
       
@@ -48,7 +105,7 @@ if (import.meta.main) {
       const gitRoot = await git.revparse(['--show-toplevel']);
       const relativePath = path.relative(gitRoot.trim(), absolutePath);
       
-      console.log(`Getting diff for commit ${commit.hash} with file ${relativePath}`);
+      debug && console.log(`Getting diff for commit ${commit.hash} with file ${relativePath}`);
 
       // Get the tree to find the historical path of the file
       const treeFiles = await git.raw([
@@ -61,12 +118,12 @@ if (import.meta.main) {
         .find(line => line.includes(relativePath) || line.includes(path.basename(relativePath)));
 
       if (!filePath) {
-        console.warn(`Could not find file in commit ${commit.hash}`);
+        debug && console.warn(`Could not find file in commit ${commit.hash}`);
         continue;
       }
 
       const historicalPath = filePath.split('\t')[1];
-      console.log(`Found file at historical path: ${historicalPath}`);
+      debug && console.log(`Found file at historical path: ${historicalPath}`);
       
       // Get the diff between this commit and its parent
       const diff = await git.raw([
@@ -81,12 +138,12 @@ if (import.meta.main) {
       });
 
       if (!diff.trim()) {
-        console.warn(`No changes found in commit ${commit.hash} for file ${relativePath}`);
+        debug && console.warn(`No changes found in commit ${commit.hash} for file ${relativePath}`);
         continue;
       }
 
       const result = await generateObject({
-        model: openai('gpt-4o-mini-2024-07-18'),
+        model: google('gemini-2.0-flash-001'),
         prompt: `
         You are an expert debugger. The user is giving you a query and a diff of a file and wants to know whether the diff is relevant to the query.
 
@@ -98,7 +155,7 @@ if (import.meta.main) {
         `,
         schema: z.object({
           relevant: z.boolean(),
-          reason: z.string(),
+          diffDescription: z.string(),
         }),
       });
 
@@ -116,9 +173,7 @@ if (import.meta.main) {
       }
       
 
-      console.log(result.object, diffUrl);
       if(result.object.relevant) {
-        // Replace the simple diff log with colored version
         const coloredDiff = diff.split('\n').map(line => {
           if (line.startsWith('+')) {
             return chalk.green(line);
@@ -129,10 +184,48 @@ if (import.meta.main) {
           }
           return line;
         }).join('\n');
+
+        relevantResults.push({
+          commitHash: commit.hash,
+          diffUrl,
+          description: result.object.diffDescription,
+          diff: coloredDiff,
+        });
         
-        console.log('diff:', coloredDiff);
-        break;
+        // Clear screen below status area and render updated results
+        // console.log('\n'.repeat(process.stdout.rows - 5));
+        // renderResults(relevantResults);
       }
+      
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // Final results display
+    console.clear();
+    console.log(chalk.bold.green(`✨ Search Complete!`));
+    console.log(chalk.yellow(`Query: ${searchDescription}`));
+    console.log(chalk.blue(`Found ${relevantResults.length} relevant changes\n`));
+    
+    if (relevantResults.length > 0) {
+      let currentIndex = 0;
+      renderResults(relevantResults, currentIndex);
+
+      // Set up keyboard controls
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.setEncoding('utf8');
+
+      process.stdin.on('data', (key) => {
+        if (key === '\u001B\u005B\u0044') { // Left arrow
+          currentIndex = (currentIndex - 1 + relevantResults.length) % relevantResults.length;
+          renderResults(relevantResults, currentIndex);
+        } else if (key === '\u001B\u005B\u0043') { // Right arrow
+          currentIndex = (currentIndex + 1) % relevantResults.length;
+          renderResults(relevantResults, currentIndex);
+        } else if (key === 'q' || key === '\u0003') { // 'q' or Ctrl+C
+          process.exit(0);
+        }
+      });
     }
   } catch (error: unknown) {
     console.error('Error:', error instanceof Error ? error.message : String(error));
