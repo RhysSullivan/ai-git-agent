@@ -40,6 +40,10 @@ if (import.meta.main) {
         reason: z.string(),
       }),
     });
-    console.log(result.object, `https://github.com/ai-sdk/ai-sdk/blob/main/${filePath}#L${commit.hash}`);
+    // remote url is https://github.com/RhysSullivan/ai-git-agent/blob/main/test/route.ts
+
+    // link to the specific commit on github
+    const diffUrl = `https://github.com/RhysSullivan/ai-git-agent/commit/${commit.hash}`;
+    console.log(result.object, diffUrl);
   }
 }
