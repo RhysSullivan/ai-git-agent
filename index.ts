@@ -18,4 +18,10 @@ if (import.meta.main) {
   }
   console.clear()
   console.log(`Starting analysis for ${filePath} with description: ${searchDescription}`);
+  // for each commit on the file, get the diff
+  const commits = await git.log({ file: filePath });
+  for (const commit of commits.all) {
+    const diff = await git.diff([commit.hash, '--', filePath]);
+    console.log(diff);
+  }
 }
